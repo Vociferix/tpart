@@ -296,15 +296,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "particles"
-version = "0.1.0"
-dependencies = [
- "crossterm",
- "rand",
- "ratatui",
-]
-
-[[package]]
 name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -507,6 +498,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "tpart"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "rand",
+ "ratatui",
 ]
 
 [[package]]
