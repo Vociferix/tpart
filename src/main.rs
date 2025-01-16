@@ -11,11 +11,13 @@ use ratatui::{
     },
     layout::Rect,
     style::Color,
-    widgets::Widget,
+    widgets::StatefulWidget,
     DefaultTerminal,
 };
 
 use rand::Rng;
+
+use rayon::prelude::*;
 
 const DENSITY: f32 = 0.15f32;
 const GRAVITY_STRENGTH: f32 = 1.2f32;
@@ -35,9 +37,15 @@ struct Mouse {
     y: f32,
 }
 
-struct Particles(Vec<Particle>);
+struct SimulationWidget;
 
-fn generate_particles(density: f32, width: u16, height: u16) -> Particles {
+struct Simulation {
+    particles: Vec<Particle>,
+    time: Instant,
+    mouse: Option<Mouse>,
+}
+
+fn generate_particles(density: f32, width: u16, height: u16) -> Vec<Particle> {
     let w = width as usize;
     let h = height as usize;
     let mut rng = rand::thread_rng();
@@ -53,96 +61,110 @@ fn generate_particles(density: f32, width: u16, height: u16) -> Particles {
         });
     }
 
-    Particles(particles)
+    particles
 }
 
-fn step(particles: &mut [Particle], delta_time: f32, mouse: Option<Mouse>) {
-    for particle in particles.iter_mut() {
-        if let Some(mouse) = mouse {
-            let dx = mouse.x - particle.x;
-            let dy = mouse.y - particle.y;
-            let distance = (dx * dx + dy * dy).sqrt();
+impl StatefulWidget for SimulationWidget {
+    type State = Simulation;
 
-            if distance > 0.2 {
-                let inv_gravity = GRAVITY_STRENGTH / distance;
-                particle.dx += dx * inv_gravity * 3.0;
-                particle.dy += dy * inv_gravity * 3.0;
+    fn render(self, area: Rect, buf: &mut Buffer, sim: &mut Simulation) {
+        let curr_time = Instant::now();
+        let delta_time = curr_time.saturating_duration_since(sim.time).as_secs_f32();
+        sim.time = curr_time;
+        let mouse = sim.mouse.clone();
+
+        buf.content.par_iter_mut().for_each(|cell| {
+            if cell.symbol() != UPPER_BLOCK {
+                cell.set_symbol(UPPER_BLOCK);
+            }
+            cell.set_fg(Color::Black);
+            cell.set_bg(Color::Black);
+        });
+
+        struct UnsafeBuf(*mut Buffer);
+
+        unsafe impl Send for UnsafeBuf {}
+
+        unsafe impl Sync for UnsafeBuf {}
+
+        impl Clone for UnsafeBuf {
+            fn clone(&self) -> Self {
+                Self(self.0.clone())
             }
         }
 
-        let friction = FRICTION_PER_SECOND.powf(delta_time);
-        particle.dx *= friction;
-        particle.dy *= friction;
-        particle.x += particle.dx * delta_time;
-        particle.y += particle.dy * delta_time;
-    }
-}
+        impl Copy for UnsafeBuf {}
 
-impl Widget for &Particles {
-    fn render(self, area: Rect, buf: &mut Buffer)
-    where
-        Self: Sized,
-    {
-        for x in area.x..(area.x + area.width) {
-            for y in area.y..(area.y + area.height) {
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    if cell.symbol() != UPPER_BLOCK {
-                        cell.set_symbol(UPPER_BLOCK);
-                    }
-                    cell.set_fg(Color::Black);
-                    cell.set_bg(Color::Black);
+        impl UnsafeBuf {
+            fn buf(&self) -> &mut Buffer {
+                unsafe { &mut *self.0 }
+            }
+        }
+
+        let unsafe_buf = UnsafeBuf(buf as *mut Buffer);
+
+        sim.particles.par_iter_mut().for_each(move |particle| {
+            if let Some(mouse) = mouse {
+                let dx = mouse.x - particle.x;
+                let dy = mouse.y - particle.y;
+                let distance = (dx * dx + dy * dy).sqrt();
+
+                if distance > 0.2 {
+                    let inv_gravity = GRAVITY_STRENGTH / distance;
+                    particle.dx += dx * inv_gravity * 3.0;
+                    particle.dy += dy * inv_gravity * 3.0;
                 }
             }
-        }
 
-        for particle in &self.0 {
-            let x = particle.x;
-            let y = particle.y;
-            if x < area.width as f32 && y < (area.height * 2) as f32 && x >= 0.0f32 && y >= 0.0f32 {
-                let x = x as u16;
-                let y = y as u16;
+            let friction = FRICTION_PER_SECOND.powf(delta_time);
+            particle.dx *= friction;
+            particle.dy *= friction;
+            particle.x += particle.dx * delta_time;
+            particle.y += particle.dy * delta_time;
+
+            if particle.x < area.width as f32
+                && particle.y < (area.height * 2) as f32
+                && particle.x >= 0.0f32
+                && particle.y >= 0.0f32
+            {
+                let x = particle.x as u16;
+                let y = particle.y as u16;
                 let red = (particle.x / area.width as f32 * 255.0 * 0.8) as u8;
-                let green = (particle.y / (area.height * 2) as f32 * 255.0 * 0.8) as u8;
+                let green = (particle.y / ((area.height * 2) as f32) * 255.0 * 0.8) as u8;
                 let blue = (255.0 * 0.6) as u8;
-                if let Some(cell) = buf.cell_mut((x, y / 2)) {
+                if let Some(cell) = unsafe_buf.buf().cell_mut((x, y / 2)) {
                     if y % 2 == 0 {
                         cell.set_fg(Color::Rgb(red, green, blue));
-                        //cell.set_fg(Color::White);
                     } else {
                         cell.set_bg(Color::Rgb(red, green, blue));
-                        //cell.set_bg(Color::White);
                     }
                 }
             }
-        }
+        });
     }
-}
-
-fn update_time(prev_time: &mut Instant) -> f32 {
-    let curr = Instant::now();
-    let delta = curr.saturating_duration_since(*prev_time);
-    *prev_time = curr;
-    delta.as_secs_f32()
 }
 
 fn run(mut terminal: DefaultTerminal) -> io::Result<()> {
     let tick_len = std::time::Duration::from_millis(34);
 
-    let mut particles = {
+    let particles = {
         let size = terminal.size()?;
         generate_particles(DENSITY, size.width, size.height * 2)
     };
-
-    let mut prev_time = Instant::now();
-
-    let mut mouse: Option<Mouse> = None;
+    let mut simulation = Simulation {
+        particles,
+        time: Instant::now(),
+        mouse: None,
+    };
 
     loop {
         terminal.draw(|frame| {
-            frame.render_widget(&particles, frame.area());
+            frame.render_stateful_widget(SimulationWidget, frame.area(), &mut simulation);
         })?;
 
-        if event::poll(tick_len)? {
+        if event::poll(
+            tick_len.saturating_sub(Instant::now().saturating_duration_since(simulation.time)),
+        )? {
             match event::read()? {
                 event::Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
                     KeyCode::Char('q') => {
@@ -150,30 +172,25 @@ fn run(mut terminal: DefaultTerminal) -> io::Result<()> {
                     }
                     KeyCode::Backspace => {
                         let size = terminal.size()?;
-                        particles = generate_particles(DENSITY, size.width, size.height * 2);
+                        simulation.particles =
+                            generate_particles(DENSITY, size.width, size.height * 2);
                         continue;
                     }
                     _ => {}
                 },
                 event::Event::Mouse(m) => {
                     if matches!(m.kind, MouseEventKind::Down(_) | MouseEventKind::Drag(_)) {
-                        mouse = Some(Mouse {
+                        simulation.mouse = Some(Mouse {
                             x: m.column as f32,
                             y: (m.row * 2) as f32,
                         });
                     } else if matches!(m.kind, MouseEventKind::Up(_)) {
-                        mouse = None;
-                    } else if matches!(m.kind, MouseEventKind::Moved) && mouse.is_some() {
-                        mouse = Some(Mouse {
-                            x: m.column as f32,
-                            y: (m.row * 2) as f32,
-                        });
+                        simulation.mouse = None;
                     }
                 }
                 _ => {}
             }
         }
-        step(&mut particles.0, update_time(&mut prev_time), mouse);
     }
 }
 
